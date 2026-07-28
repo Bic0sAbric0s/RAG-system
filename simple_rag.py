@@ -36,7 +36,6 @@ llm_pipeline = pipeline(
 )
 
 class SimpleRAG:
-    """Minimal RAG implementation - in-memory only (no database)"""
     
     def __init__(self):
         self.chunks = []
@@ -49,25 +48,25 @@ class SimpleRAG:
         response = requests.get(url)
         pdf_file = BytesIO(response.content)
         
-        # Extract text
+
         print("Extracting text...")
         reader = PdfReader(pdf_file)
         text = ""
         for page in reader.pages:
             text += page.extract_text() + "\n"
-        
-        # Chunk the text
+    
+
         print("Chunking text...")
         self.chunks = self._chunk_text(text, chunk_size=800, overlap=100)
         print(f"Created {len(self.chunks)} chunks")
         
-        # Generate embeddings
+
         print("Generating embeddings...")
         self.embeddings = embedder.encode(self.chunks, show_progress_bar=True)
         print("Ready to answer questions!")
     
     def _chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
-        """Split text into overlapping chunks"""
+
         chunks = []
         start = 0
         
@@ -84,58 +83,47 @@ class SimpleRAG:
         return chunks
     
     def _find_relevant_chunks(self, question: str, k: int = 3) -> List[str]:
-        """Find most relevant chunks for the question"""
-        # Generate embedding for question
+
         question_embedding = embedder.encode([question])[0]
         
-        # Calculate cosine similarity
         similarities = []
         for chunk_embedding in self.embeddings:
             similarity = np.dot(question_embedding, chunk_embedding) / (
                 np.linalg.norm(question_embedding) * np.linalg.norm(chunk_embedding)
             )
             similarities.append(similarity)
-        
-        # Get top k chunks
+
         top_indices = np.argsort(similarities)[-k:][::-1]
         return [self.chunks[i] for i in top_indices]
     
     def ask(self, question: str) -> str:
-        """Ask a question and get an answer"""
-        # Find relevant context
+
         relevant_chunks = self._find_relevant_chunks(question)
         context = "\n\n---\n\n".join(relevant_chunks)
-        
-        # Build messages
+
         messages = [
             {
                 "role": "system",
                 "content": f"""You are a helpful assistant. Answer questions based on the provided context.
-If the answer is not in the context, say "I don't have that information in the document."
+                If the answer is not in the context, say "I don't have that information in the document."
 
-Context:
-{context}
-"""
+                Context:
+                {context}
+                """
             }
         ]
         
-        # Add conversation history
         messages.extend(self.conversation_history)
-        
-        # Add current question
+
         messages.append({"role": "user", "content": question})
         
         try:
             raw_response = llm_pipeline(messages)
             answer = raw_response[0]['generated_text']
-            # print(f"Чистый ответ: {raw_response[0]['generated_text']}")
-            
 
-            # Save to history
             self.conversation_history.append({"role": "user", "content": question})
             self.conversation_history.append({"role": "assistant", "content": answer})
             
-            # Keep only last 6 messages (3 turns)
             if len(self.conversation_history) > 6:
                 self.conversation_history = self.conversation_history[-6:]
             
@@ -144,7 +132,6 @@ Context:
             return f'Error generating response'
     
     def chat(self):
-        """Interactive chat loop"""
         print("\n" + "="*60)
         print("RAG Assistant Ready! Type 'quit' to exit")
         print("="*60 + "\n")
@@ -172,8 +159,7 @@ Context:
 
 
 def main():
-    """Run the RAG assistant"""
-    
+
     rag = SimpleRAG()
     
     pdf_url = "https://phi-public.s3.amazonaws.com/recipes/ThaiRecipes.pdf"
