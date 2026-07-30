@@ -1,6 +1,12 @@
+import chromadb
+import uuid
+import os
+from chromadb.config import Settings
 import torch
-from typing import List
+from typing import List, Optional, Dict
+from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from transformers import BitsAndBytesConfig
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from pypdf import PdfReader
@@ -11,18 +17,31 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+client = chromadb.Client()
+collection = client.get_or_create_collection(
+    name='',
+    metadata={"hnsw:space": "cosine"}
+)
+
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
 embedder = SentenceTransformer('intfloat/multilingual-e5-large')
 print("Model loaded!")
 
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True
+)
+
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    dtype=torch.float16,
+    quantization_config=quantization_config,
     device_map="auto",
     trust_remote_code=True
 )
+
 llm_pipeline = pipeline(
     'text-generation',
     model=model,
@@ -35,26 +54,60 @@ llm_pipeline = pipeline(
     return_full_text=False
 )
 
-class SimpleRAG:
-    
-    def __init__(self):
+class SimpleRAG:    
+    def __init__(self, persist_directory='./chroma_db'):
+        self.chroma_client = chromadb.PersistentClient(
+            path=persist_directory,
+            settings=Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
+        )
+
+        self.collection_name = 'documents'
+        self.collection = self.get_or_create_collection_db()
+        self.documet_registry = {}
+
         self.chunks = []
         self.embeddings = None
         self.conversation_history = []
+
+        print(f'Documents in DB {self.collection.count()}')
+
+    def get_or_create_collection_db(self):
+        try:
+            collection = self.chroma_client.get_collection(
+                name=self.collection_name,
+                embedding_function=None
+            )
+            return collection
+
+        except:
+            collection = self.chroma_client.create_collection(
+                name=self.collection_name,
+                metadata={'hnsw:space': 'cosine'}
+            )
+            print('Create new collection')
+            return collection
     
-    def load_pdf_from_url(self, url: str):
-        """Load and process PDF"""
-        print(f"Downloading PDF from {url}...")
-        response = requests.get(url)
-        pdf_file = BytesIO(response.content)
+    def add_documet(self, source: str, source_type: str = 'url', metadata: Optional[Dict] = None) -> str:
+        doc_id = str(uuid.uuid4())
+        
+        if source_type == 'url':
+            response = requests.get(source)
+            pdf_file = BytesIO(response.content)
+            doc_name = source.split('/')[-1]
+        else:
+            pdf_file = source
+            doc_name = os.path.basename(source)
         
 
-        print("Extracting text...")
         reader = PdfReader(pdf_file)
-        text = ""
         for page in reader.pages:
-            text += page.extract_text() + "\n"
-    
+            text += page.extract_text() + '\n'
+
+        if not text.strip():
+            raise ValueError("No text could be extracted from the PDF")
 
         print("Chunking text...")
         self.chunks = self._chunk_text(text, chunk_size=800, overlap=100)
@@ -64,7 +117,33 @@ class SimpleRAG:
         print("Generating embeddings...")
         self.embeddings = embedder.encode(self.chunks, show_progress_bar=True)
         print("Ready to answer questions!")
+
+        base_metadata = {
+            'document_id': doc_id,
+            'document_name': doc_name,
+            'source': source,
+            'added_date': datetime.now().isoformat(),
+            'chunk_count': len(self.chunks)
+        }
+
+        if metadata:
+            base_metadata.update(metadata)
     
+        # added chunk_ids and metadatas in ChromaDB
+            
+        self.collection.add(
+            embeddings=self.embeddings.tolist(),
+            documents=self.chunks,
+        )
+
+        self.document_registry[doc_id] = {
+            "name": doc_name,
+            "chunks": len(self.chunks),
+            "source": source,
+            "added_date": base_metadata["added_date"]
+        }
+        print(f'Document {doc_name} added')
+
     def _chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
 
         chunks = []
