@@ -17,30 +17,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-client = chromadb.Client()
-collection = client.get_or_create_collection(
-    name='',
-    metadata={"hnsw:space": "cosine"}
-)
-
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
 embedder = SentenceTransformer('intfloat/multilingual-e5-large')
 print("Model loaded!")
 
-quantization_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True
-)
+# quantization_config = BitsAndBytesConfig(
+#     load_in_4bit=True,
+#     bnb_4bit_compute_dtype=torch.float16,
+#     bnb_4bit_use_double_quant=True,
+#     llm_int8_enable_fp32_cpu_offload=True
+# )
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    quantization_config=quantization_config,
+    dtype=torch.float16,
     device_map="auto",
-    trust_remote_code=True
+    trust_remote_code=True,
+    ignore_mismatched_sizes=True,
+    low_cpu_mem_usage=False
 )
+print('Модель загружена!')
 
 llm_pipeline = pipeline(
     'text-generation',
@@ -54,7 +52,7 @@ llm_pipeline = pipeline(
     return_full_text=False
 )
 
-class SimpleRAG:    
+class ChromaRAG:    
     def __init__(self, persist_directory='./chroma_db'):
         self.chroma_client = chromadb.PersistentClient(
             path=persist_directory,
@@ -103,6 +101,7 @@ class SimpleRAG:
         
 
         reader = PdfReader(pdf_file)
+        text = ''
         for page in reader.pages:
             text += page.extract_text() + '\n'
 
@@ -130,10 +129,14 @@ class SimpleRAG:
             base_metadata.update(metadata)
     
         # added chunk_ids and metadatas in ChromaDB
+        chunk_ids = [f'{doc_id}_chunk_{i}' for i in range(len(self.chunks))]
+        metadatas = [{**base_metadata, 'chunk_index': i} for i in range(len(self.chunks))]
             
         self.collection.add(
             embeddings=self.embeddings.tolist(),
             documents=self.chunks,
+            ids=chunk_ids,
+            metadatas=metadatas
         )
 
         self.document_registry[doc_id] = {
@@ -143,6 +146,7 @@ class SimpleRAG:
             "added_date": base_metadata["added_date"]
         }
         print(f'Document {doc_name} added')
+        return doc_id
 
     def _chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
 
@@ -161,24 +165,48 @@ class SimpleRAG:
         
         return chunks
     
-    def _find_relevant_chunks(self, question: str, k: int = 3) -> List[str]:
+    def search(self, query: str, k: int = 3, filter_by_document: Optional[List] = None, filter_by_metadata: Optional[List] = None):
+        query_embedding = embedder.encode([query])[0]
 
-        question_embedding = embedder.encode([question])[0]
-        
-        similarities = []
-        for chunk_embedding in self.embeddings:
-            similarity = np.dot(question_embedding, chunk_embedding) / (
-                np.linalg.norm(question_embedding) * np.linalg.norm(chunk_embedding)
-            )
-            similarities.append(similarity)
+        where_filter = None
+        if filter_by_document:
+            where_filter = {'document_id': filter_by_document}
+        elif filter_by_metadata:
+            where_filter = filter_by_metadata
 
-        top_indices = np.argsort(similarities)[-k:][::-1]
-        return [self.chunks[i] for i in top_indices]
+        results = self.collection.query(
+            query_embeddings=[query_embedding.tolist()],
+            n_results=k,
+            where=where_filter,
+            include=['documents', 'metadatas', 'distances']
+        )
+
+        formatted_results = []
+        for i in range(len(results['documents'][0])):
+            formatted_results.append({
+                'text': results['documents'][0][i],
+                'metadata': results['metadatas'][0][i],
+                'distance': results['distances'][0][i],
+                'relevance_score': 1 - results['distances'][0][i]
+            })
+
+        return formatted_results
     
-    def ask(self, question: str) -> str:
+    def ask(self, question: str, k: int = 3, filter_by_document: Optional[str] = None) -> str:
+        if self.collection.count() == 0:
+            return {
+                "answer": "No documents loaded. Please add documents first.",
+                "sources": []
+            }
+        
+        results = self.search(question, k=k, filter_by_document=filter_by_document)
 
-        relevant_chunks = self._find_relevant_chunks(question)
-        context = "\n\n---\n\n".join(relevant_chunks)
+        context_parts = []
+        for i in results:
+            doc_name = i['metadata'].get('document_name', 'Unknown')
+            context_parts.append(f'[From: {doc_name}]\n{i['text']}')
+
+        context = "\n\n---\n\n".join(context_parts)
 
         messages = [
             {
@@ -191,8 +219,8 @@ class SimpleRAG:
                 """
             }
         ]
-        
-        messages.extend(self.conversation_history)
+        for msg in self.conversation_history[-4:]:
+            messages.append(msg)
 
         messages.append({"role": "user", "content": question})
         
@@ -239,10 +267,21 @@ class SimpleRAG:
 
 def main():
 
-    rag = SimpleRAG()
+    rag = ChromaRAG(persist_directory='./my_documents_db')
     
-    pdf_url = "https://phi-public.s3.amazonaws.com/recipes/ThaiRecipes.pdf"
-    rag.load_pdf_from_url(pdf_url)
+    if rag.collection.count() == 0:
+        print('Database is empty')
+    
+        example_pdf = [
+            'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
+            'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf'
+        ]
+        
+        for url in example_pdf:
+            try:
+                rag.add_documet(url, 'url')
+            except:
+                print(f'Failed to add {url}')
     
     rag.chat()
 
