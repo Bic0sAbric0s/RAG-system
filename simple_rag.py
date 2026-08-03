@@ -45,7 +45,7 @@ llm_pipeline = pipeline(
     model=model,
     tokenizer=tokenizer,
     max_new_tokens=512,
-    temperature=0.7,
+    temperature=0.1,
     do_sample=True,
     top_p=0.95,
     repetition_penalty=1.1,
@@ -147,6 +147,31 @@ class ChromaRAG:
         }
         print(f'Document {doc_name} added')
         return doc_id
+    
+    def list_document(self) -> List[Dict]:
+        results = self.collection.get(include=['metadatas'])
+
+        documents = {}
+        for metadata in results['metadatas']:
+            doc_id = metadata.get('document_id')
+            if doc_id and doc_id not in documents:
+                documents[doc_id] = {
+                    "id": doc_id[:8] + "...",
+                    "name": metadata.get('document_name', 'Unknown'),
+                    "source": metadata.get('source', 'Unknown'),
+                    "added_date": metadata.get('added_date', 'Unknown'),
+                    "chunks": metadata.get('chunk_count', 0)
+                }
+        return list(documents.values())
+    
+    def clear_database(self):
+        s = input('Are you sure you want to delete ALL documents? (y/n): ')
+
+        if s.lower() == 'y':
+            self.chroma_client.delete_collection(self.collection_name)
+            self.collection = self.get_or_create_collection_db()
+            self.conversation_history = []
+            print("Database cleared")
 
     def _chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
 
@@ -193,6 +218,7 @@ class ChromaRAG:
         return formatted_results
     
     def ask(self, question: str, k: int = 3, filter_by_document: Optional[str] = None) -> str:
+
         if self.collection.count() == 0:
             return {
                 "answer": "No documents loaded. Please add documents first.",
@@ -272,17 +298,20 @@ def main():
     if rag.collection.count() == 0:
         print('Database is empty')
     
-        example_pdf = [
-            'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
-            'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf'
-        ]
+    example_pdf = [
+        'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
+        'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf',
+        'https://kurskmed.com/upload/departments/library/img/proekt-23/Chekhov.pdf',
+        'file:///C:/Users/Дом/Downloads/Статистика%20и%20котики%20by%20Савельев,%20Владимир%20(z-lib.org).pdf'
+    ]
         
-        for url in example_pdf:
-            try:
-                rag.add_documet(url, 'url')
-            except:
-                print(f'Failed to add {url}')
-    
+    for url in example_pdf:
+        try:
+            rag.add_documet(url, 'url')
+        except:
+            print(f'Failed to add {url}')
+        print(rag.list_document())
+
     rag.chat()
 
 
