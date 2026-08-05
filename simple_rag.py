@@ -115,7 +115,7 @@ class ChromaRAG:
 
         print("Generating embeddings...")
         self.embeddings = embedder.encode(self.chunks, show_progress_bar=True)
-        print("Ready to answer questions!")
+        print("Ready to answer commands!")
 
         base_metadata = {
             'document_id': doc_id,
@@ -217,7 +217,7 @@ class ChromaRAG:
 
         return formatted_results
     
-    def ask(self, question: str, k: int = 3, filter_by_document: Optional[str] = None) -> str:
+    def ask(self, command: str, k: int = 3, filter_by_document: Optional[str] = None) -> str:
 
         if self.collection.count() == 0:
             return {
@@ -225,7 +225,7 @@ class ChromaRAG:
                 "sources": []
             }
         
-        results = self.search(question, k=k, filter_by_document=filter_by_document)
+        results = self.search(command, k=k, filter_by_document=filter_by_document)
 
         context_parts = []
         for i in results:
@@ -237,7 +237,7 @@ class ChromaRAG:
         messages = [
             {
                 "role": "system",
-                "content": f"""You are a helpful assistant. Answer questions based on the provided context.
+                "content": f"""You are a helpful assistant. Answer commands based on the provided context.
                 If the answer is not in the context, say "I don't have that information in the document."
 
                 Context:
@@ -248,13 +248,13 @@ class ChromaRAG:
         for msg in self.conversation_history[-4:]:
             messages.append(msg)
 
-        messages.append({"role": "user", "content": question})
+        messages.append({"role": "user", "content": command})
         
         try:
             raw_response = llm_pipeline(messages)
             answer = raw_response[0]['generated_text']
 
-            self.conversation_history.append({"role": "user", "content": question})
+            self.conversation_history.append({"role": "user", "content": command})
             self.conversation_history.append({"role": "assistant", "content": answer})
             
             if len(self.conversation_history) > 6:
@@ -263,6 +263,13 @@ class ChromaRAG:
             return raw_response
         except:
             return f'Error generating response'
+        
+    def get_stats(self):
+        return {
+            'total_chunks': self.collection.count(),
+            'collection_name': self.collection_name,
+            'unique_documents': len(self.list_document())
+        }
     
     def chat(self):
         print("\n" + "="*60)
@@ -271,18 +278,42 @@ class ChromaRAG:
         
         while True:
             try:
-                question = input("You: ").strip()
+                command = input("You: ").strip()
+
+                if command.lower() == 'stats':
+                    stats = self.get_stats()
+                    print(f'Collection name: {stats['collection_name']}')
+                    print(f'Number of chunks: {stats['total_chunks']}')
+                    print(f'Unique documents: {stats['unique_documents']}')
+
+                if command.lower() == 'list':
+                    docs = self.list_document()
+                    if docs:
+                        for i, doc in enumerate(docs, 1):
+                            print(f'{i}. {doc['name']}; {doc['chunks']}; {doc['added_date']}')
+                            # print(f'{i}. {doc['name']}')
+                            # print(f'   Number of chunks: {doc['chunks']}')
+                            # print(f'   Date: {doc['added_date']}')
+                    else:
+                        print('No documents in database')
+
+                if command.lower() in ['clear', 'clear database', 'database clear']:
+                    self.clear_database()
                 
-                if question.lower() in ['quit', 'exit', 'q']:
+                if command.lower() in ['quit', 'exit', 'q']:
                     print("Goodbye!")
                     break
                 
-                if not question:
+                if command.lower() == 'ask':               
+                    question = input('Write your question: ').strip()
+
+                    print("\nThinking...\n")
+                    answer = self.ask(question)
+                    print(f"Assistant: {answer[0]['generated_text']}\n")
+
+                if not command:
+                    print('Enter the command!')
                     continue
-                
-                print("\nThinking...\n")
-                answer = self.ask(question)
-                print(f"Assistant: {answer[0]['generated_text']}\n")
                 
             except KeyboardInterrupt:
                 print("\n\nGoodbye!")
@@ -298,19 +329,17 @@ def main():
     if rag.collection.count() == 0:
         print('Database is empty')
     
-    example_pdf = [
-        'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
-        'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf',
-        'https://kurskmed.com/upload/departments/library/img/proekt-23/Chekhov.pdf',
-        'file:///C:/Users/Дом/Downloads/Статистика%20и%20котики%20by%20Савельев,%20Владимир%20(z-lib.org).pdf'
-    ]
+        example_pdf = [
+            'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
+            'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf',
+            'https://kurskmed.com/upload/departments/library/img/proekt-23/Chekhov.pdf'
+        ]
         
-    for url in example_pdf:
-        try:
-            rag.add_documet(url, 'url')
-        except:
-            print(f'Failed to add {url}')
-        print(rag.list_document())
+        for url in example_pdf:
+            try:
+                rag.add_documet(url, 'url')
+            except:
+                print(f'Failed to add {url}')
 
     rag.chat()
 
