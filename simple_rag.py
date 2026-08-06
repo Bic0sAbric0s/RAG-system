@@ -18,36 +18,39 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+quantization_config = BitsAndBytesConfig(
+    load_in_8bit=True,
+    llm_int8_threshold=6.0,
+    llm_int8_enable_fp32_cpu_offload=True
+)
+
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
 embedder = SentenceTransformer('intfloat/multilingual-e5-large')
 print("Model loaded!")
 
-# quantization_config = BitsAndBytesConfig(
-#     load_in_4bit=True,
-#     bnb_4bit_compute_dtype=torch.float16,
-#     bnb_4bit_use_double_quant=True,
-#     llm_int8_enable_fp32_cpu_offload=True
-# )
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
+    quantization_config=quantization_config,
     dtype=torch.float16,
     device_map="auto",
     trust_remote_code=True,
-    ignore_mismatched_sizes=True,
+    # ignore_mismatched_sizes=True,
     low_cpu_mem_usage=False
 )
-print('Модель загружена!')
+print("Model loaded!")
 
 llm_pipeline = pipeline(
     'text-generation',
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=512,
-    temperature=0.1,
+    max_new_tokens=256,
+    temperature=0.7,
     do_sample=True,
+    pad_token_id=tokenizer.eos_token_id,
+    num_beams=1,
     top_p=0.95,
     repetition_penalty=1.1,
     return_full_text=False
@@ -182,9 +185,9 @@ class ChromaRAG:
             self.chroma_client = chromadb.PersistentClient(
                 path=db_path, 
                 settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=True
-            ))
+                    anonymized_telemetry=False,
+                    allow_reset=True
+                ))
             self.collection = self.get_or_create_collection_db()
             self.conversation_history = []
 
