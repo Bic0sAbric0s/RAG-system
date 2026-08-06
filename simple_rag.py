@@ -12,6 +12,7 @@ import numpy as np
 from pypdf import PdfReader
 import requests
 from io import BytesIO
+import shutil
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -54,6 +55,8 @@ llm_pipeline = pipeline(
 
 class ChromaRAG:    
     def __init__(self, persist_directory='./chroma_db'):
+        self.persist_directory = persist_directory
+
         self.chroma_client = chromadb.PersistentClient(
             path=persist_directory,
             settings=Settings(
@@ -169,9 +172,21 @@ class ChromaRAG:
 
         if s.lower() == 'y':
             self.chroma_client.delete_collection(self.collection_name)
+
+            db_path = self.persist_directory
+            if os.path.exists(db_path):
+                shutil.rmtree(db_path, ignore_errors=True)
+                print(f"Folder deleted: {db_path}")
+
+            os.makedirs(db_path, exist_ok=True)
+            self.chroma_client = chromadb.PersistentClient(
+                path=db_path, 
+                settings=Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            ))
             self.collection = self.get_or_create_collection_db()
             self.conversation_history = []
-            print("Database cleared")
 
     def _chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
 
@@ -280,6 +295,14 @@ class ChromaRAG:
             try:
                 command = input("You: ").strip()
 
+                if command.lower() == 'add':
+                    url_file = input('Write the file url: ')
+
+                    try:
+                        self.add_documet(url_file)
+                    except:
+                        print(f'Failed tp file ({url_file})')
+
                 if command.lower() == 'stats':
                     stats = self.get_stats()
                     print(f'Collection name: {stats['collection_name']}')
@@ -329,17 +352,17 @@ def main():
     if rag.collection.count() == 0:
         print('Database is empty')
     
-        example_pdf = [
-            'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
-            'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf',
-            'https://kurskmed.com/upload/departments/library/img/proekt-23/Chekhov.pdf'
-        ]
+    #     example_pdf = [
+    #         'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
+    #         'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf',
+    #         'https://kurskmed.com/upload/departments/library/img/proekt-23/Chekhov.pdf'
+    #     ]
         
-        for url in example_pdf:
-            try:
-                rag.add_documet(url, 'url')
-            except:
-                print(f'Failed to add {url}')
+    #     for url in example_pdf:
+    #         try:
+    #             rag.add_documet(url, 'url')
+    #         except:
+    #             print(f'Failed to add {url}')
 
     rag.chat()
 
