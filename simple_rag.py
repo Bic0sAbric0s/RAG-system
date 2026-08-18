@@ -13,6 +13,8 @@ from pypdf import PdfReader
 import requests
 from io import BytesIO
 import shutil
+import hashlib
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -72,8 +74,13 @@ class ChromaRAG:
         self.collection = self.get_or_create_collection_db()
         self.documet_registry = {}
 
+        self.response_cache = {}
+        self.cache_path = Path('./cache/responses.json')
+        self.cache_path.parent.mkdir(exist_ok=True)
+
         self.chunks = []
         self.embeddings = None
+        self.embeddings_cache = {}
         self.conversation_history = []
 
         print(f'Documents in DB {self.collection.count()}')
@@ -191,7 +198,7 @@ class ChromaRAG:
             self.collection = self.get_or_create_collection_db()
             self.conversation_history = []
 
-    def _chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
+    def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
 
         chunks = []
         start = 0
@@ -208,8 +215,17 @@ class ChromaRAG:
         
         return chunks
     
+    def _get_cahced_embedding(self, text: str):
+        text_hash = hashlib.md5(text.encode())
+
+        embedding = embedder.encode([text])[0]
+        self.embeddings_cache[text_hash] = embedding
+
+        return embedding
+    
     def search(self, query: str, k: int = 3, filter_by_document: Optional[List] = None, filter_by_metadata: Optional[List] = None):
-        query_embedding = embedder.encode([query])[0]
+        # query_embedding = embedder.encode([query])[0]
+        query_embedding = self._get_cahced_embedding(query)
 
         where_filter = None
         if filter_by_document:
