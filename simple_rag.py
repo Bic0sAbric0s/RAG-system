@@ -15,6 +15,7 @@ from io import BytesIO
 import shutil
 import hashlib
 from pathlib import Path
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,7 +27,8 @@ quantization_config = BitsAndBytesConfig(
     llm_int8_enable_fp32_cpu_offload=True
 )
 
-model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
 
 embedder = SentenceTransformer('intfloat/multilingual-e5-large')
 print("Model loaded!")
@@ -48,9 +50,10 @@ llm_pipeline = pipeline(
     'text-generation',
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=256,
-    temperature=0.7,
-    do_sample=True,
+    max_new_tokens=128,
+    max_length=512,
+    temperature=0.5,
+    do_sample=True,       # попробовать изменить
     pad_token_id=tokenizer.eos_token_id,
     num_beams=1,
     top_p=0.95,
@@ -75,8 +78,14 @@ class ChromaRAG:
         self.documet_registry = {}
 
         self.response_cache = {}
-        self.cache_path = Path('./cache/responses.json')
-        self.cache_path.parent.mkdir(exist_ok=True)
+        self.cache_dir = Path('./cache')
+        self.cache_file = self.cache_dir / 'responses.json'
+        self.cache_file.mkdir(parents=True, exist_ok=True)
+        
+        if not self.cache_file.exists():
+            self.cache_file.write_text('{}', encoding='utf-8')
+        self._load_cache()
+        
 
         self.chunks = []
         self.embeddings = None
@@ -84,6 +93,20 @@ class ChromaRAG:
         self.conversation_history = []
 
         print(f'Documents in DB {self.collection.count()}')
+
+    def _load_cache(self):
+        try:
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                self.response_cache = json.load(f)
+            print('✅ Кэш загружен')
+        except FileNotFoundError:
+            print('⚠️ Файл кэша не найден, создаю новый')
+            self.response_cache = {}
+            self._save_cache()
+
+    def _save_cache(self):
+        with open(self.cache_file, 'w') as f:
+            json.dump(self.response_cache, f)
 
     def get_or_create_collection_db(self):
         try:
@@ -235,7 +258,7 @@ class ChromaRAG:
 
         results = self.collection.query(
             query_embeddings=[query_embedding.tolist()],
-            n_results=k,
+            n_results=min(k*2, 10),
             where=where_filter,
             include=['documents', 'metadatas', 'distances']
         )
@@ -260,6 +283,11 @@ class ChromaRAG:
             }
         
         results = self.search(command, k=k, filter_by_document=filter_by_document)
+
+        cache_key = hashlib.md5(command.encode()).hexdigest()
+        if cache_key in self.response_cache:
+            print(self.response_cache[cache_key])
+            return str(self.response_cache[cache_key])
 
         context_parts = []
         for i in results:
@@ -293,6 +321,9 @@ class ChromaRAG:
             
             if len(self.conversation_history) > 6:
                 self.conversation_history = self.conversation_history[-6:]
+
+            self.response_cache[cache_key] = answer
+            self._save_cache()
             
             return raw_response
         except:
@@ -313,6 +344,19 @@ class ChromaRAG:
         while True:
             try:
                 command = input("You: ").strip()
+
+                if command.lower() == 'response cache':
+                    return self.response_cache
+
+                if command.lower() == 'cache':
+                    return {
+                        'size': len(self.response_cache),
+                        'file_size': self.cache_file.stat().st_size                
+                        }
+
+                if command.lower() in ['clear cache', 'cache clear', 'cache cl', 'cache c']:
+                    self.response_cache = {}
+                    self._save_cache()
 
                 if command.lower() == 'add':
                     url_file = input('Write the file url: ')
