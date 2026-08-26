@@ -16,6 +16,7 @@ import shutil
 import hashlib
 from pathlib import Path
 import json
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,7 +31,12 @@ quantization_config = BitsAndBytesConfig(
 # model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
 
-embedder = SentenceTransformer('intfloat/multilingual-e5-large')
+if torch.cuda.is_available():
+    device = 'cuda'
+else:
+    device = 'cpu'
+
+embedder = SentenceTransformer('intfloat/multilingual-e5-large', device=device)
 print("Model loaded!")
 
 
@@ -50,9 +56,8 @@ llm_pipeline = pipeline(
     'text-generation',
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=128,
-    max_length=512,
-    temperature=0.5,
+    max_new_tokens=256,
+    temperature=0.3,
     do_sample=True,       # попробовать изменить
     pad_token_id=tokenizer.eos_token_id,
     num_beams=1,
@@ -79,8 +84,8 @@ class ChromaRAG:
 
         self.response_cache = {}
         self.cache_dir = Path('./cache')
-        self.cache_file = self.cache_dir / 'responses.json'
-        self.cache_file.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_file = self.cache_dir / 'responses.json'  
         
         if not self.cache_file.exists():
             self.cache_file.write_text('{}', encoding='utf-8')
@@ -98,9 +103,7 @@ class ChromaRAG:
         try:
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 self.response_cache = json.load(f)
-            print('✅ Кэш загружен')
         except FileNotFoundError:
-            print('⚠️ Файл кэша не найден, создаю новый')
             self.response_cache = {}
             self._save_cache()
 
@@ -150,7 +153,7 @@ class ChromaRAG:
         
 
         print("Generating embeddings...")
-        self.embeddings = embedder.encode(self.chunks, show_progress_bar=True)
+        self.embeddings = embedder.encode(self.chunks, batch_size=128, show_progress_bar=True, device=device)
         print("Ready to answer commands!")
 
         base_metadata = {
@@ -325,7 +328,7 @@ class ChromaRAG:
             self.response_cache[cache_key] = answer
             self._save_cache()
             
-            return raw_response
+            return str(raw_response)
         except:
             return f'Error generating response'
         
@@ -346,17 +349,18 @@ class ChromaRAG:
                 command = input("You: ").strip()
 
                 if command.lower() == 'response cache':
-                    return self.response_cache
+                    print(self.response_cache)
 
                 if command.lower() == 'cache':
-                    return {
+                    print({
                         'size': len(self.response_cache),
                         'file_size': self.cache_file.stat().st_size                
-                        }
+                        })
 
                 if command.lower() in ['clear cache', 'cache clear', 'cache cl', 'cache c']:
                     self.response_cache = {}
                     self._save_cache()
+                    print('Done!')
 
                 if command.lower() == 'add':
                     url_file = input('Write the file url: ')
@@ -395,7 +399,7 @@ class ChromaRAG:
 
                     print("\nThinking...\n")
                     answer = self.ask(question)
-                    print(f"Assistant: {answer[0]['generated_text']}\n")
+                    print(f"Assistant: {answer}\n")
 
                 if not command:
                     print('Enter the command!')
