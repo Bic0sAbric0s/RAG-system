@@ -17,9 +17,6 @@ import hashlib
 from pathlib import Path
 import json
 import time
-from dotenv import load_dotenv
-
-load_dotenv()
 
 
 quantization_config = BitsAndBytesConfig(
