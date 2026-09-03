@@ -1,1 +1,14 @@
 .env
+config.py
+
+chroma_db/
+*.chroma_db/
+__pycache__/ 
+my_documents_db/
+cache/
+
+*.csv
+*.db
+*.xlsx
+*.json
+*.sqlite3
