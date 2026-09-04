@@ -10,6 +10,7 @@ from transformers import BitsAndBytesConfig
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from pypdf import PdfReader
+import docx
 import requests
 from io import BytesIO
 import shutil
@@ -124,22 +125,24 @@ class ChromaRAG:
             print('Create new collection')
             return collection
     
-    def add_documet(self, source: str, source_type: str = 'url', metadata: Optional[Dict] = None) -> str:
+    def add_documet(self, source: str, source_type: str = 'url', file_bytes = None, metadata: Optional[Dict] = None) -> str:
         doc_id = str(uuid.uuid4())
         
-        if source_type == 'url':
-            response = requests.get(source)
-            pdf_file = BytesIO(response.content)
-            doc_name = source.split('/')[-1]
-        else:
-            pdf_file = source
-            doc_name = os.path.basename(source)
-        
+        if source_type == 'bytes' and file_bytes is not None:
+            doc_name = source or "document"
+            text = self.filtering_files_by_extensions(file_bytes, doc_name)
 
-        reader = PdfReader(pdf_file)
-        text = ''
-        for page in reader.pages:
-            text += page.extract_text() + '\n'
+        elif source_type == 'url':
+            response = requests.get(source)
+            doc_name = source.split('/')[-1]
+            text = self.filtering_files_by_extensions(BytesIO(response.content), doc_name)
+        
+        elif source_type == 'file':
+                doc_name = os.path.basename(source)
+                with open(source, 'rb') as f:
+                    file_bytes = f.read()
+                text = self.filtering_files_by_extensions(file_bytes, doc_name)
+        
 
         if not text.strip():
             raise ValueError("No text could be extracted from the PDF")
@@ -175,7 +178,7 @@ class ChromaRAG:
             metadatas=metadatas
         )
 
-        self.document_registry[doc_id] = {
+        self.documet_registry[doc_id] = {
             "name": doc_name,
             "chunks": len(self.chunks),
             "source": source,
@@ -183,6 +186,35 @@ class ChromaRAG:
         }
         print(f'Document {doc_name} added')
         return doc_id
+    
+    def filtering_files_by_extensions(self, file_bytes, doc_name):
+        extension = os.path.splitext(doc_name)[1].lower()
+
+        if extension == '.pdf':
+            return self.pdf_extension(file_bytes)
+        elif extension == '.docx':
+            return self.docx_extension(file_bytes)
+        elif extension == '.txt':
+            return self.txt_extension(file_bytes)
+
+    def pdf_extension(self, file_bytes):
+        pdf_file = BytesIO(file_bytes)
+        reader = PdfReader(pdf_file)
+        text = ''
+        for page in reader.pages:
+            text += page.extract_text() + '\n'
+        return text
+    
+    def docx_extension(self, file_bytes):
+        docx_file = BytesIO(file_bytes)
+        doc = docx.Document(docx_file)
+        text = ''
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + '\n'
+        return text
+    
+    def txt_extension(self, file_bytes):
+        return file_bytes.decode('utf-8', errors='ignore')
     
     def list_document(self) -> List[Dict]:
         results = self.collection.get(include=['metadatas'])
@@ -277,10 +309,8 @@ class ChromaRAG:
     def ask(self, command: str, k: int = 3, filter_by_document: Optional[str] = None) -> str:
 
         if self.collection.count() == 0:
-            return {
-                "answer": "No documents loaded. Please add documents first.",
-                "sources": []
-            }
+            return "No documents loaded. Please add documents first."
+                
         
         results = self.search(command, k=k, filter_by_document=filter_by_document)
 
@@ -325,7 +355,7 @@ class ChromaRAG:
             self.response_cache[cache_key] = answer
             self._save_cache()
             
-            return str(raw_response)
+            return answer[0]['generated_text']
         except:
             return f'Error generating response'
         
@@ -335,6 +365,11 @@ class ChromaRAG:
             'collection_name': self.collection_name,
             'unique_documents': len(self.list_document())
         }
+    
+    def clear_cache(self):
+        self.response_cache = {}
+        self._save_cache()
+        return '✅ Готово!'
     
     def chat(self):
         print("\n" + "="*60)
@@ -355,9 +390,7 @@ class ChromaRAG:
                         })
 
                 if command.lower() in ['clear cache', 'cache clear', 'cache cl', 'cache c']:
-                    self.response_cache = {}
-                    self._save_cache()
-                    print('Done!')
+                    self.clear_cache()
 
                 if command.lower() == 'add':
                     url_file = input('Write the file url: ')

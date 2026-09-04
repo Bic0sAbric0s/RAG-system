@@ -7,6 +7,7 @@ from simple_rag import ChromaRAG
 from config import bot_token
 import asyncio
 from datetime import datetime
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -141,20 +142,30 @@ async def stats_command(message: Message):
     except Exception:
         await message.answer("❌ Ошибка при получении статистики.")
 
-@router.message(Command('clearcache'))
-async def clearcache_command(message: Message):
-    # try:
-    if hasattr(rag_system, 'clear_cache'):
-        result = rag_system.clear_cache()
-    
-        await message.answer(result)
-    # except Exception:
-    #     await message.answer("❌ Ошибка при очистке кэша")
-    
+@router.message(F.document)
+async def handle_document(message: Message, state: FSMContext):
+    document = message.document
+    file_name = document.file_name
+    file_extension = os.path.splitext(file_name)[1].lower()
 
-@router.message(Command('cleardb'))
-async def cleardb_command(message: Message):
-    pass
+    extensions = ['.pdf', '.docx', '.txt']
+    if file_extension not in extensions:
+        await message.answer('❌ Неподдерживаемый формат!')
+        return
+    
+    processing_msg = await message.answer(
+        "📥 Получаю документ..."
+        f"📄 {document.file_name}"
+    )
+
+    # try:
+    await processing_msg.edit_text('⌛ Документ получен! Это может занять 1-2 минуты')
+
+    file = await bot.get_file(document.file_id)
+    file_bytes = await bot.download_file(file.file_path)
+
+    doc = rag_system.add_documet(file_name, 'bytes', file_bytes.read())
+    await processing_msg.edit_text('✅ Документ успешно обработан!')
 
 @router.message(F.text)
 async def handle_text(message: Message, state: FSMContext):
