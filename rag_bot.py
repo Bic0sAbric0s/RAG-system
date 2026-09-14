@@ -1,6 +1,8 @@
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, CallbackQuery
 from aiogram.enums import ChatAction
 from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
 from simple_rag import ChromaRAG
@@ -19,19 +21,20 @@ dp.include_router(router)
 
 rag_system = ChromaRAG(persist_directory='./my_documents_db')
 
+docs_pee_page = 10
 user_sessions = {}
 
 def get_user_session(user_id: int):
     if user_id not in user_sessions:
         user_sessions[user_id] = {
-            "history": [],
-            "last_activity": datetime.now(),
-            "questions_asked": 0,
-            "documents_loaded": 0,
-            "preferences": {
-                "language": "ru",
-                "detail_level": "normal",
-                "show_sources": True
+            'history': [],
+            'last_activity': datetime.now(),
+            'questions_asked': 0,
+            'documents_loaded': 0,
+            'preferences': {
+                'language': 'ru',
+                'detail_level': 'normal',
+                'show_sources': True
             }
         }
     return user_sessions[user_id]
@@ -69,8 +72,7 @@ async def help_command(message: Message):
                 /help - основные команды
                 /list - список загруженных документов
                 /stats - статистика базы данных
-                /clearcache - очиста кэша
-                /cleardb - очиста базы данных
+                /delete - удаление последнего документа в базе данных
                 """
     await message.answer(help_text)
 
@@ -94,27 +96,112 @@ async def info_command(message: Message):
                 """
     await message.answer(info_text)
 
+def build_documents_text(documents: list, page: int = 0) -> str:
+    start = page * docs_pee_page
+    end = start + docs_pee_page
+    page_docs = documents[start:end]
+
+    total_pages = (len(documents) + docs_pee_page - 1) // docs_pee_page
+
+    text = f'📚 В базе {len(documents)} документов\n'
+
+    for i, doc in enumerate(page_docs, start=start + 1):
+        doc_name = doc.get('name', 'Unknown')
+        doc_chunks = doc.get('chunks', 0)
+        doc_date = doc.get('added_date', 'Unknown')
+
+        text += f'{i}. {doc_name}\n'
+        text += f'   📊 Чанков: {doc_chunks}\n'
+        if doc_date != 'Unknown':
+            text += f'   📅 Добавлен: {doc_date[:10]}\n'
+        text += '\n'
+
+    return text
+
+def build_pagination_keyboard(page: int, total_pages: int):
+    builder = InlineKeyboardBuilder()
+
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton(
+            text='⬅️ Предыдущие',
+            callback_data=f'docs_page_{page - 1}'
+        ))
+
+    buttons.append(InlineKeyboardButton(
+        text=f'{page + 1}/{total_pages}',
+        callback_data='docs_page_ignore'
+    ))
+
+    if page < total_pages - 1:
+        buttons.append(InlineKeyboardButton(
+            text='Следующие ➡️',
+            callback_data=f'docs_page_{page + 1}'
+        ))
+
+    builder.row(*buttons)
+    return builder.as_markup()
+
 @router.message(Command('list'))
 async def list_command(message: Message):
     if hasattr(rag_system, 'list_document'):
-        document = rag_system.list_document()
+        documents = rag_system.list_document()
+    else:
+        documents = []
 
-    text = f'В базе {len(document)} количество документов\n'
-    for i, doc in enumerate(document, 1):
-        if i <= 10:
-            doc_name = doc.get('name', 'Unknown')
-            doc_chunks = doc.get('chunks', 0)
-            doc_date = doc.get('added_date', 'Unknown')
-            
-            text += f"{i}. {doc_name}\n"
-            text += f"   📊 Чанков: {doc_chunks}\n"
-            if doc_date != 'Unknown':
-                text += f"   📅 Добавлен: {doc_date[:10]}\n"
-            text += "\n"
-        else:
-            break
-    
-    await message.answer(text)
+    if not documents:
+        await message.answer('В базе пока нет документов.')
+        return
+
+    total_pages = (len(documents) + docs_pee_page - 1) // docs_pee_page
+    text = build_documents_text(documents, page=0)
+
+    if total_pages <= 1:
+        await message.answer(text)
+        return
+
+    await message.answer(
+        text,
+        reply_markup=build_pagination_keyboard(page=0, total_pages=total_pages)
+    )
+
+@router.callback_query(lambda c: c.data.startswith('docs_page_'))
+async def paginate_documents(callback: CallbackQuery):
+    page_str = callback.data.replace('docs_page_', '')
+
+    if page_str == 'ignore':
+        await callback.answer()
+        return
+
+    page = int(page_str)
+
+    if hasattr(rag_system, 'list_document'):
+        documents = rag_system.list_document()
+    else:
+        documents = []
+
+    if not documents:
+        await callback.answer('Документы не найдены')
+        return
+
+    total_pages = (len(documents) + docs_pee_page - 1) // docs_pee_page
+
+    if page < 0:
+        page = 0
+    elif page >= total_pages:
+        page = total_pages - 1
+
+    text = build_documents_text(documents, page=page)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=build_pagination_keyboard(page=page, total_pages=total_pages)
+        )
+    except Exception as e:
+        await callback.answer()
+
+    await callback.answer()
 
 @router.message(Command('stats'))
 async def stats_command(message: Message):
@@ -140,7 +227,13 @@ async def stats_command(message: Message):
         await message.answer(stats_text) 
 
     except Exception:
-        await message.answer("❌ Ошибка при получении статистики.")
+        await message.answer('❌ Ошибка при получении статистики.')
+
+@router.message(Command('delete'))
+async def list_command(message: Message):
+    result = rag_system.delete_last_document()
+    
+    await message.answer(result[1])
 
 @router.message(F.document)
 async def handle_document(message: Message, state: FSMContext):
@@ -154,8 +247,8 @@ async def handle_document(message: Message, state: FSMContext):
         return
     
     processing_msg = await message.answer(
-        "📥 Получаю документ..."
-        f"📄 {document.file_name}"
+        '📥 Получаю документ...'
+        f'📄 {document.file_name}'
     )
 
     # try:
@@ -187,7 +280,7 @@ async def handle_text(message: Message, state: FSMContext):
     await message.answer(answer)
 
 
-    # await message.answer("❌ RAG система не настроена для вопросов.")
+    # await message.answer('❌ RAG система не настроена для вопросов.')
     # return
 
 async def main():

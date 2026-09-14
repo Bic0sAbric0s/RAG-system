@@ -124,6 +124,72 @@ class ChromaRAG:
             )
             print('Create new collection')
             return collection
+        
+    def get_last_document_id(self) -> Optional[str]:
+
+        if not self.collection:
+            return None
+        
+        results = self.collection.get(include=["metadatas"])
+        
+        if not results['metadatas']:
+            print("📭 База данных пуста")
+            return None
+        
+        documents = {}
+        for metadata in results['metadatas']:
+            doc_id = metadata.get('document_id')
+            doc_name = metadata.get('document_name', 'Unknown')
+            added_date = metadata.get('added_date', '')
+            
+            if doc_id and doc_id not in documents:
+                documents[doc_id] = {
+                    'id': doc_id,
+                    'name': doc_name,
+                    'date': added_date,
+                    'chunk_count': 0
+                }
+            
+            if doc_id in documents:
+                documents[doc_id]['chunk_count'] += 1
+        
+        # Находим последний документ по дате
+        last_doc = None
+        last_date = ''
+        
+        for doc_id, doc_info in documents.items():
+            if doc_info['date'] > last_date:
+                last_date = doc_info['date']
+                last_doc = doc_info
+        
+        return last_doc
+
+        
+    def delete_last_document(self):
+
+        # if not self.collection:
+        #     return False, "База данных не подключена"
+
+        last_doc = self.get_last_document_id()
+        
+        if not last_doc:
+            return False, "Документы не найдены в базе"
+        
+        doc_id = last_doc['id']
+        doc_name = last_doc['name']
+
+        results = self.collection.get(
+            where={"document_id": doc_id},
+            include=["metadatas"]
+        )
+        
+        if not results['ids']:
+            return False, f"Чанки документа '{doc_name}' не найдены"
+
+        self.collection.delete(ids=results['ids'])
+        
+        return True, f"Документ '{doc_name}' удален ({len(results['ids'])} чанков)"
+            
     
     def add_documet(self, source: str, source_type: str = 'url', file_bytes = None, metadata: Optional[Dict] = None) -> str:
         doc_id = str(uuid.uuid4())
@@ -260,13 +326,23 @@ class ChromaRAG:
         
         while start < len(text):
             end = start + chunk_size
-            chunk = text[start:end]
+            if end < len(text):
+                search_start = start + int(chunk_size * 0.5)
+                best_split = -1
+                
+                for sep in ['. ', '! ', '? ', '.\n', '\n\n', '\n']:
+                    pos = text.rfind(sep, search_start, end)
+                    if pos > best_split:
+                        best_split = pos + len(sep)
+                
+                if best_split > 0:
+                    end = best_split
             
-            
-            if chunk.strip():
-                chunks.append(chunk.strip())
-            
-            start += chunk_size - overlap
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+
+            start = max(end - overlap, start + 1)
         
         return chunks
     
@@ -279,7 +355,7 @@ class ChromaRAG:
         return embedding
     
     def search(self, query: str, k: int = 3, filter_by_document: Optional[List] = None, filter_by_metadata: Optional[List] = None):
-        # query_embedding = embedder.encode([query])[0]
+        min_relevance = 0.5
         query_embedding = self._get_cahced_embedding(query)
 
         where_filter = None
@@ -290,26 +366,53 @@ class ChromaRAG:
 
         results = self.collection.query(
             query_embeddings=[query_embedding.tolist()],
-            n_results=min(k*2, 10),
+            n_results=min(k*3, 15),
             where=where_filter,
             include=['documents', 'metadatas', 'distances']
         )
 
+        candidates = []
         formatted_results = []
-        for i in range(len(results['documents'][0])):
-            formatted_results.append({
-                'text': results['documents'][0][i],
-                'metadata': results['metadatas'][0][i],
-                'distance': results['distances'][0][i],
-                'relevance_score': 1 - results['distances'][0][i]
-            })
+        query_words = set(query.lower().split())
+
+        # for i in range(len(results['documents'][0])):
+        #     formatted_results.append({
+        #         'text': results['documents'][0][i],
+        #         'metadata': results['metadatas'][0][i],
+        #         'distance': results['distances'][0][i],
+        #         'relevance_score': 1 - results['distances'][0][i]
+        #     })
+
+        #     # if int(formatted_results['relevance_score']) < min_relevance:
+        #     #     continue
+
+        #     text_words = set(formatted_results['text'].lower().split())
+        #     overlap = len(query_words & text_words)
+        #     length_penalty = 1.0 / (1 + len(formatted_results['text']) / 1000)
+
+        #     final_score = int(formatted_results['relevance_score']) + 0.1 * overlap * length_penalty
+            
+        #     candidates.append({
+        #         'text': formatted_results['text'],
+        #         'metadata': results['metadatas'][0][i],
+        #         'distance': formatted_results['distance'],
+        #         'relevance_score': formatted_results['relevance_score'],
+        #         'final_score': final_score
+        #     })
+        
+        # candidates.sort(key=lambda x: x['final_score'], reverse=True)
+
+        # formatted_results = candidates[:k]
+        
+        # if not formatted_results and candidates:
+        #     formatted_results = candidates[:1]
 
         return formatted_results
     
     def ask(self, command: str, k: int = 3, filter_by_document: Optional[str] = None) -> str:
 
         if self.collection.count() == 0:
-            return "No documents loaded. Please add documents first."
+            return "Добавьте первый документ. База данных пуста."
                 
         
         results = self.search(command, k=k, filter_by_document=filter_by_document)
@@ -342,22 +445,22 @@ class ChromaRAG:
 
         messages.append({"role": "user", "content": command})
         
-        try:
-            raw_response = llm_pipeline(messages)
-            answer = raw_response[0]['generated_text']
+        # try:
+        raw_response = llm_pipeline(messages)
+        answer = raw_response[0]['generated_text']
 
-            self.conversation_history.append({"role": "user", "content": command})
-            self.conversation_history.append({"role": "assistant", "content": answer})
-            
-            if len(self.conversation_history) > 6:
-                self.conversation_history = self.conversation_history[-6:]
+        self.conversation_history.append({"role": "user", "content": command})
+        self.conversation_history.append({"role": "assistant", "content": answer})
+        
+        if len(self.conversation_history) > 6:
+            self.conversation_history = self.conversation_history[-6:]
 
-            self.response_cache[cache_key] = answer
-            self._save_cache()
-            
-            return answer[0]['generated_text']
-        except:
-            return f'Error generating response'
+        self.response_cache[cache_key] = answer
+        self._save_cache()
+        
+        return answer
+        # except:
+        #     return f'Error generating response'
         
     def get_stats(self):
         return {
