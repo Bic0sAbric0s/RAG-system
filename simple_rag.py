@@ -18,6 +18,7 @@ import hashlib
 from pathlib import Path
 import json
 import time
+import system_promt_mode
 
 
 quantization_config = BitsAndBytesConfig(
@@ -26,8 +27,9 @@ quantization_config = BitsAndBytesConfig(
     llm_int8_enable_fp32_cpu_offload=True
 )
 
+model_name = "Qwen/Qwen2.5-3B-Instruct"
 # model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
+# model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
 
 if torch.cuda.is_available():
     device = 'cuda'
@@ -54,9 +56,9 @@ llm_pipeline = pipeline(
     'text-generation',
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=256,
-    temperature=0.3,
-    do_sample=True,       # попробовать изменить
+    max_new_tokens=200,
+    temperature=0,
+    do_sample=False,       # попробовать изменить
     pad_token_id=tokenizer.eos_token_id,
     num_beams=1,
     top_p=0.95,
@@ -383,8 +385,11 @@ class ChromaRAG:
         #         'relevance_score': 1 - results['distances'][0][i]
         #     })
 
-        #     # if int(formatted_results['relevance_score']) < min_relevance:
-        #     #     continue
+        #     print(formatted_results)
+        #     print(type(formatted_results))
+
+        #     if int(formatted_results['relevance_score']) < min_relevance:
+        #         continue
 
         #     text_words = set(formatted_results['text'].lower().split())
         #     overlap = len(query_words & text_words)
@@ -409,11 +414,34 @@ class ChromaRAG:
 
         return formatted_results
     
+    def _detect_mode(self, question: str):
+        question = question.lower().strip()
+
+        analytical_markers = [
+            "о чём", "о чем", "суть", "главная мысль", "основная мысль",
+            "кратко", "суммир", "пересказ", "смысл", "идея",
+            "объясни", "расскажи", "что говорится", "чему посвящ"
+        ]
+        for m in analytical_markers:
+            if m in question:
+                return "analytical"
+        
+        reasoning_markers = [
+            "почему", "зачем", "как связано", "сравни", "разница",
+            "сделай вывод", "проанализируй", "в чём причина"
+        ]
+        for m in reasoning_markers:
+            if m in question:
+                return "reasoning"
+        
+        return "factual"
+
     def ask(self, command: str, k: int = 3, filter_by_document: Optional[str] = None) -> str:
 
         if self.collection.count() == 0:
             return "Добавьте первый документ. База данных пуста."
-                
+        
+        mode = self._detect_mode(command)
         
         results = self.search(command, k=k, filter_by_document=filter_by_document)
 
@@ -429,24 +457,48 @@ class ChromaRAG:
 
         context = "\n\n---\n\n".join(context_parts)
 
-        messages = [
-            {
-                "role": "system",
-                "content": f"""You are a helpful assistant. Answer commands based on the provided context.
-                If the answer is not in the context, say "I don't have that information in the document."
+        if mode == "analytical":
+            system_content = system_promt_mode.system_promt_analytical(context=context)
+            max_tokens = 300
+        elif mode == "reasoning":
+            system_content = system_promt_mode.system_promt_reasoning(context=context)
+            max_tokens = 400
+        else:
+            system_content = system_promt_mode.system_promt_factual(context=context)
+            max_tokens = 150
+    
+        # messages = [
+        #     {
+        #         "role": "system",
+        #         "content": f"""Вы — полезный помощник. Отвечайте на команды с учетом предоставленного контекста.
+        #         Если ответа нет в контексте, скажите: «В документе нет такой информации»."
 
-                Context:
-                {context}
-                """
-            }
+        #         ПРАВИЛА:
+        #         1. Отвечай ТОЛЬКО фактами из КОНТЕКСТА ниже.
+        #         2. НЕ выдумывай, НЕ добавляй от себя, НЕ додумывай.
+        #         3. Если в контексте есть точная формулировка — используй её дословно.
+        #         4. Если ответа нет — ответь ровно: "В документе нет этой информации."
+        #         5. НЕ начинай с "Конечно!", "Отличный вопрос!", "Согласно контексту".
+        #         6. Отвечай 1-3 предложениями. Закончил мысль — остановись.
+                
+        #         Context:
+        #         {context}
+        #         """
+        #     }
+        # ]
+            
+        messages = [
+            {"role": "system", 
+             "content": system_content}
         ]
+
         for msg in self.conversation_history[-4:]:
             messages.append(msg)
 
         messages.append({"role": "user", "content": command})
         
         # try:
-        raw_response = llm_pipeline(messages)
+        raw_response = llm_pipeline(messages, max_new_tokens=max_tokens)
         answer = raw_response[0]['generated_text']
 
         self.conversation_history.append({"role": "user", "content": command})
@@ -569,3 +621,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
