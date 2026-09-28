@@ -1,4 +1,4 @@
-def system_promt_factual(context):
+def system_prompt_factual(context):
     return """Ты — ассистент, который отвечает СТРОГО по тексту документа.
 
         ЖЁСТКИЕ ПРАВИЛА:
@@ -24,7 +24,7 @@ def system_promt_factual(context):
         КОНТЕКСТ:
         {context}"""
 
-def system_promt_analytical(context):
+def system_prompt_analytical(context):
     return """Ты — внимательный читатель, который объясняет суть текста.
 
         ПРАВИЛА:
@@ -49,7 +49,7 @@ def system_promt_analytical(context):
         КОНТЕКСТ:
         {context}"""
 
-def system_promt_reasoning(context):
+def system_prompt_reasoning(context):
     return """Ты — аналитик, который отвечает на вопросы по тексту.
 
         ПРАВИЛА:

@@ -28,8 +28,6 @@ quantization_config = BitsAndBytesConfig(
 )
 
 model_name = "Qwen/Qwen2.5-3B-Instruct"
-# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-# model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
 
 if torch.cuda.is_available():
     device = 'cuda'
@@ -37,8 +35,10 @@ else:
     device = 'cpu'
 
 embedder = SentenceTransformer('intfloat/multilingual-e5-large', device=device)
-print("Model loaded!")
-
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"Embedder device: {embedder.device}")
+print(f"Model on device: {next(embedder.parameters()).device}")
+embedder = embedder.to('cuda')
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
@@ -47,10 +47,9 @@ model = AutoModelForCausalLM.from_pretrained(
     dtype=torch.float16,
     device_map="auto",
     trust_remote_code=True,
-    # ignore_mismatched_sizes=True,
     low_cpu_mem_usage=False
 )
-print("Model loaded!")
+print("Модель готова!")
 
 llm_pipeline = pipeline(
     'text-generation',
@@ -58,7 +57,7 @@ llm_pipeline = pipeline(
     tokenizer=tokenizer,
     max_new_tokens=200,
     temperature=0,
-    do_sample=False,       # попробовать изменить
+    do_sample=False,       
     pad_token_id=tokenizer.eos_token_id,
     num_beams=1,
     top_p=0.95,
@@ -80,7 +79,7 @@ class ChromaRAG:
 
         self.collection_name = 'documents'
         self.collection = self.get_or_create_collection_db()
-        self.documet_registry = {}
+        self.document_registry = {}
 
         self.response_cache = {}
         self.cache_dir = Path('./cache')
@@ -97,7 +96,7 @@ class ChromaRAG:
         self.embeddings_cache = {}
         self.conversation_history = []
 
-        print(f'Documents in DB {self.collection.count()}')
+        print(f'Документы в DB {self.collection.count()}')
 
     def _load_cache(self):
         try:
@@ -124,7 +123,7 @@ class ChromaRAG:
                 name=self.collection_name,
                 metadata={'hnsw:space': 'cosine'}
             )
-            print('Create new collection')
+            print('Создана новая коллекция')
             return collection
         
     def get_last_document_id(self) -> Optional[str]:
@@ -154,8 +153,7 @@ class ChromaRAG:
             
             if doc_id in documents:
                 documents[doc_id]['chunk_count'] += 1
-        
-        # Находим последний документ по дате
+     
         last_doc = None
         last_date = ''
         
@@ -169,8 +167,8 @@ class ChromaRAG:
         
     def delete_last_document(self):
 
-        # if not self.collection:
-        #     return False, "База данных не подключена"
+        if not self.collection:
+            return False, "База данных не подключена"
 
         last_doc = self.get_last_document_id()
         
@@ -193,7 +191,7 @@ class ChromaRAG:
         return True, f"Документ '{doc_name}' удален ({len(results['ids'])} чанков)"
             
     
-    def add_documet(self, source: str, source_type: str = 'url', file_bytes = None, metadata: Optional[Dict] = None) -> str:
+    def add_document(self, source: str, source_type: str = 'url', file_bytes = None, metadata: Optional[Dict] = None) -> str:
         doc_id = str(uuid.uuid4())
         
         if source_type == 'bytes' and file_bytes is not None:
@@ -203,7 +201,7 @@ class ChromaRAG:
         elif source_type == 'url':
             response = requests.get(source)
             doc_name = source.split('/')[-1]
-            text = self.filtering_files_by_extensions(BytesIO(response.content), doc_name)
+            text = self.filtering_files_by_extensions(response.content, doc_name)
         
         elif source_type == 'file':
                 doc_name = os.path.basename(source)
@@ -213,16 +211,16 @@ class ChromaRAG:
         
 
         if not text.strip():
-            raise ValueError("No text could be extracted from the PDF")
+            raise ValueError("Из PDF-файла не удалось извлечь текст")
 
-        print("Chunking text...")
-        self.chunks = self._chunk_text(text, chunk_size=800, overlap=100)
-        print(f"Created {len(self.chunks)} chunks")
+        print("Чанкинг текста...")
+        self.chunks = self._chunk_text(text, chunk_size=1500, overlap=100)
+        print(f"Создание чанка длиной {len(self.chunks)}")
         
 
-        print("Generating embeddings...")
-        self.embeddings = embedder.encode(self.chunks, batch_size=128, show_progress_bar=True, device=device)
-        print("Ready to answer commands!")
+        print("Генерация эмбендингов...")
+        self.embeddings = embedder.encode(self.chunks, batch_size=32, show_progress_bar=True, device=device)
+        print("Готов выполнять команды!")
 
         base_metadata = {
             'document_id': doc_id,
@@ -235,7 +233,6 @@ class ChromaRAG:
         if metadata:
             base_metadata.update(metadata)
     
-        # added chunk_ids and metadatas in ChromaDB
         chunk_ids = [f'{doc_id}_chunk_{i}' for i in range(len(self.chunks))]
         metadatas = [{**base_metadata, 'chunk_index': i} for i in range(len(self.chunks))]
             
@@ -246,13 +243,13 @@ class ChromaRAG:
             metadatas=metadatas
         )
 
-        self.documet_registry[doc_id] = {
+        self.document_registry[doc_id] = {
             "name": doc_name,
             "chunks": len(self.chunks),
             "source": source,
             "added_date": base_metadata["added_date"]
         }
-        print(f'Document {doc_name} added')
+        print(f'Документ {doc_name} добавлен')
         return doc_id
     
     def filtering_files_by_extensions(self, file_bytes, doc_name):
@@ -301,7 +298,7 @@ class ChromaRAG:
         return list(documents.values())
     
     def clear_database(self):
-        s = input('Are you sure you want to delete ALL documents? (y/n): ')
+        s = input('Вы уверены, что хотите удалить ВСЕ документы? (y/n): ')
 
         if s.lower() == 'y':
             self.chroma_client.delete_collection(self.collection_name)
@@ -309,7 +306,7 @@ class ChromaRAG:
             db_path = self.persist_directory
             if os.path.exists(db_path):
                 shutil.rmtree(db_path, ignore_errors=True)
-                print(f"Folder deleted: {db_path}")
+                print(f"Папка удалена: {db_path}")
 
             os.makedirs(db_path, exist_ok=True)
             self.chroma_client = chromadb.PersistentClient(
@@ -325,30 +322,37 @@ class ChromaRAG:
 
         chunks = []
         start = 0
-        
+        separators = ['. ', '! ', '? ', '.\n', '\n\n', '\n']
+
         while start < len(text):
             end = start + chunk_size
             if end < len(text):
-                search_start = start + int(chunk_size * 0.5)
+                search_start = start + int(chunk_size // 2)
                 best_split = -1
                 
-                for sep in ['. ', '! ', '? ', '.\n', '\n\n', '\n']:
+                for sep in separators:
                     pos = text.rfind(sep, search_start, end)
                     if pos > best_split:
                         best_split = pos + len(sep)
                 
-                if best_split > 0:
+                if best_split > start + 1:
                     end = best_split
-            
+                else:
+                    end = start + chunk_size
+
             chunk = text[start:end].strip()
             if chunk:
                 chunks.append(chunk)
-
-            start = max(end - overlap, start + 1)
+            
+            new_start = end - overlap
+            if new_start <= start:
+                new_start = start + max(chunk_size - overlap, 1)
+            
+            start = new_start
         
         return chunks
-    
-    def _get_cahced_embedding(self, text: str):
+
+    def _get_cached_embedding(self, text: str):
         text_hash = hashlib.md5(text.encode())
 
         embedding = embedder.encode([text])[0]
@@ -357,8 +361,7 @@ class ChromaRAG:
         return embedding
     
     def search(self, query: str, k: int = 3, filter_by_document: Optional[List] = None, filter_by_metadata: Optional[List] = None):
-        min_relevance = 0.5
-        query_embedding = self._get_cahced_embedding(query)
+        query_embedding = self._get_cached_embedding(query)
 
         where_filter = None
         if filter_by_document:
@@ -373,46 +376,7 @@ class ChromaRAG:
             include=['documents', 'metadatas', 'distances']
         )
 
-        candidates = []
-        formatted_results = []
-        query_words = set(query.lower().split())
-
-        # for i in range(len(results['documents'][0])):
-        #     formatted_results.append({
-        #         'text': results['documents'][0][i],
-        #         'metadata': results['metadatas'][0][i],
-        #         'distance': results['distances'][0][i],
-        #         'relevance_score': 1 - results['distances'][0][i]
-        #     })
-
-        #     print(formatted_results)
-        #     print(type(formatted_results))
-
-        #     if int(formatted_results['relevance_score']) < min_relevance:
-        #         continue
-
-        #     text_words = set(formatted_results['text'].lower().split())
-        #     overlap = len(query_words & text_words)
-        #     length_penalty = 1.0 / (1 + len(formatted_results['text']) / 1000)
-
-        #     final_score = int(formatted_results['relevance_score']) + 0.1 * overlap * length_penalty
-            
-        #     candidates.append({
-        #         'text': formatted_results['text'],
-        #         'metadata': results['metadatas'][0][i],
-        #         'distance': formatted_results['distance'],
-        #         'relevance_score': formatted_results['relevance_score'],
-        #         'final_score': final_score
-        #     })
-        
-        # candidates.sort(key=lambda x: x['final_score'], reverse=True)
-
-        # formatted_results = candidates[:k]
-        
-        # if not formatted_results and candidates:
-        #     formatted_results = candidates[:1]
-
-        return formatted_results
+        return results
     
     def _detect_mode(self, question: str):
         question = question.lower().strip()
@@ -458,34 +422,14 @@ class ChromaRAG:
         context = "\n\n---\n\n".join(context_parts)
 
         if mode == "analytical":
-            system_content = system_promt_mode.system_promt_analytical(context=context)
+            system_content = system_promt_mode.system_prompt_analytical(context=context)
             max_tokens = 300
         elif mode == "reasoning":
-            system_content = system_promt_mode.system_promt_reasoning(context=context)
+            system_content = system_promt_mode.system_prompt_reasoning(context=context)
             max_tokens = 400
         else:
-            system_content = system_promt_mode.system_promt_factual(context=context)
+            system_content = system_promt_mode.system_prompt_factual(context=context)
             max_tokens = 150
-    
-        # messages = [
-        #     {
-        #         "role": "system",
-        #         "content": f"""Вы — полезный помощник. Отвечайте на команды с учетом предоставленного контекста.
-        #         Если ответа нет в контексте, скажите: «В документе нет такой информации»."
-
-        #         ПРАВИЛА:
-        #         1. Отвечай ТОЛЬКО фактами из КОНТЕКСТА ниже.
-        #         2. НЕ выдумывай, НЕ добавляй от себя, НЕ додумывай.
-        #         3. Если в контексте есть точная формулировка — используй её дословно.
-        #         4. Если ответа нет — ответь ровно: "В документе нет этой информации."
-        #         5. НЕ начинай с "Конечно!", "Отличный вопрос!", "Согласно контексту".
-        #         6. Отвечай 1-3 предложениями. Закончил мысль — остановись.
-                
-        #         Context:
-        #         {context}
-        #         """
-        #     }
-        # ]
             
         messages = [
             {"role": "system", 
@@ -497,22 +441,22 @@ class ChromaRAG:
 
         messages.append({"role": "user", "content": command})
         
-        # try:
-        raw_response = llm_pipeline(messages, max_new_tokens=max_tokens)
-        answer = raw_response[0]['generated_text']
+        try:
+            raw_response = llm_pipeline(messages, max_new_tokens=max_tokens)
+            answer = raw_response[0]['generated_text']
 
-        self.conversation_history.append({"role": "user", "content": command})
-        self.conversation_history.append({"role": "assistant", "content": answer})
-        
-        if len(self.conversation_history) > 6:
-            self.conversation_history = self.conversation_history[-6:]
+            self.conversation_history.append({"role": "user", "content": command})
+            self.conversation_history.append({"role": "assistant", "content": answer})
+            
+            if len(self.conversation_history) > 6:
+                self.conversation_history = self.conversation_history[-6:]
 
-        self.response_cache[cache_key] = answer
-        self._save_cache()
-        
-        return answer
-        # except:
-        #     return f'Error generating response'
+            self.response_cache[cache_key] = answer
+            self._save_cache()
+            
+            return answer
+        except:
+            return f'Ошибка генерации текста'
         
     def get_stats(self):
         return {
@@ -528,12 +472,12 @@ class ChromaRAG:
     
     def chat(self):
         print("\n" + "="*60)
-        print("RAG Assistant Ready! Type 'quit' to exit")
+        print("RAG Assistant готов! Введите 'quit', чтобы выйти")
         print("="*60 + "\n")
         
         while True:
             try:
-                command = input("You: ").strip()
+                command = input("Вы: ").strip()
 
                 if command.lower() == 'response cache':
                     print(self.response_cache)
@@ -548,12 +492,12 @@ class ChromaRAG:
                     self.clear_cache()
 
                 if command.lower() == 'add':
-                    url_file = input('Write the file url: ')
+                    url_file = input('Напишите url файла: ')
 
                     try:
-                        self.add_documet(url_file)
+                        self.add_document(url_file)
                     except:
-                        print(f'Failed tp file ({url_file})')
+                        print(f'Ошибка файла ({url_file})')
 
                 if command.lower() == 'stats':
                     stats = self.get_stats()
@@ -566,35 +510,33 @@ class ChromaRAG:
                     if docs:
                         for i, doc in enumerate(docs, 1):
                             print(f'{i}. {doc['name']}; {doc['chunks']}; {doc['added_date']}')
-                            # print(f'{i}. {doc['name']}')
-                            # print(f'   Number of chunks: {doc['chunks']}')
-                            # print(f'   Date: {doc['added_date']}')
+
                     else:
-                        print('No documents in database')
+                        print('Нет документа в базе данных')
 
                 if command.lower() in ['clear', 'clear database', 'database clear']:
                     self.clear_database()
                 
                 if command.lower() in ['quit', 'exit', 'q']:
-                    print("Goodbye!")
+                    print("До скорого!")
                     break
                 
                 if command.lower() == 'ask':               
-                    question = input('Write your question: ').strip()
+                    question = input('Напишите свой вопрос: ').strip()
 
-                    print("\nThinking...\n")
+                    print("\nДумаю...\n")
                     answer = self.ask(question)
-                    print(f"Assistant: {answer}\n")
+                    print(f"Ассистент: {answer}\n")
 
                 if not command:
-                    print('Enter the command!')
+                    print('Введите команду!')
                     continue
                 
             except KeyboardInterrupt:
-                print("\n\nGoodbye!")
+                print("\n\nДо скорого!")
                 break
             except Exception as e:
-                print(f"\nError: {e}\n")
+                print(f"\nОшибка: {e}\n")
 
 
 def main():
@@ -602,19 +544,7 @@ def main():
     rag = ChromaRAG(persist_directory='./my_documents_db')
     
     if rag.collection.count() == 0:
-        print('Database is empty')
-    
-    #     example_pdf = [
-    #         'https://rus-center.lgaki.info/wp-content/uploads/2022/03/chehov_kryzhovnik.pdf',
-    #         'https://old1.natlib.uz/Content/userfiles/upload/Дп%20стр/yubilyar/ru/130%20лет_Каштанка_Чехов%20Антон%20Павлович.pdf',
-    #         'https://kurskmed.com/upload/departments/library/img/proekt-23/Chekhov.pdf'
-    #     ]
-        
-    #     for url in example_pdf:
-    #         try:
-    #             rag.add_documet(url, 'url')
-    #         except:
-    #             print(f'Failed to add {url}')
+        print('База пуста')
 
     rag.chat()
 
